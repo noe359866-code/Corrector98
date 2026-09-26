@@ -155,7 +155,14 @@ export class Db {
         if (lastId !== null) query = query.gt('id', lastId);
         return applyFilters(query);
       });
-      if (error) throw new Error(`Error leyendo ${this.table}: ${error.message}`);
+      if (error) {
+        const detail = error.message ?? 'error desconocido';
+        const isStatementTimeout = error.code === '57014' || /statement timeout/i.test(detail);
+        const hint = isStatementTimeout
+          ? ' PostgreSQL alcanzó statement_timeout (no se corrige con DB_TIMEOUT_MS). Si es el escaneo adulto por ILIKE, comprueba/aplica sql/001_recommended_indexes.sql para los índices pg_trgm de title/title_text.'
+          : '';
+        throw new Error(`Error leyendo ${this.table}: ${detail}.${hint}`);
+      }
       if (!Array.isArray(data)) throw new Error('Respuesta de escaneo inválida');
       if (!data.length) return;
 
