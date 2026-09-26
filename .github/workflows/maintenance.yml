@@ -49,14 +49,6 @@ jobs:
       - name: Tests unitarios (parsers y lógica de deduplicación)
         run: npm test
 
-      # Caché de búsquedas sin resultado en AniList/Kitsu/TMDB (evita malgastar cuota).
-      - name: Restaurar caché de enriquecimiento
-        uses: actions/cache/restore@v6
-        with:
-          path: .enrich-cache.json
-          key: enrich-cache-${{ github.run_id }}
-          restore-keys: enrich-cache-
-
       - name: Ejecutar mantenimiento
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
@@ -69,12 +61,8 @@ jobs:
           # Ajustes opcionales vía "Repository variables" (Settings → Secrets and variables → Actions → Variables)
           DEDUPE_OTHER_LANGUAGES: ${{ vars.DEDUPE_OTHER_LANGUAGES || 'delete' }}
           ENRICH_MAX_TITLES: ${{ vars.ENRICH_MAX_TITLES || '400' }}
+          ENRICH_MAX_MINUTES: ${{ vars.ENRICH_MAX_MINUTES || '45' }}
+          FILL_METADATA: ${{ vars.FILL_METADATA || 'true' }}
           ADULT_EXTRA_KEYWORDS: ${{ vars.ADULT_EXTRA_KEYWORDS }}
         run: node src/index.js
 
-      - name: Guardar caché de enriquecimiento
-        if: always()
-        uses: actions/cache/save@v6
-        with:
-          path: .enrich-cache.json
-          key: enrich-cache-${{ github.run_id }}

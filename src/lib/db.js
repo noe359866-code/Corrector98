@@ -21,7 +21,15 @@ export class Db {
     this.table = config.table;
     this.client = createClient(config.supabaseUrl, config.supabaseKey, {
       auth: { persistSession: false, autoRefreshToken: false },
-      global: { headers: { 'x-application-name': 'corrector98-maintenance' } },
+      global: {
+        headers: {
+          'x-application-name': 'corrector98-maintenance',
+          // Leída por el trigger de updated_at (sql/002_preserve_updated_at.sql) vía
+          // current_setting('request.headers'): los cambios de mantenimiento no deben
+          // "rejuvenecer" los torrents (el purgador de muertos depende de updated_at).
+          ...(config.preserveUpdatedAt ? { 'x-preserve-updated-at': 'true' } : {}),
+        },
+      },
     });
     this.initialRowCount = null;
     this.totalDeleted = 0;
@@ -39,6 +47,15 @@ export class Db {
     );
     if (error) throw new Error(`Error contando filas: ${error.message}`);
     return count ?? 0;
+  }
+
+  /** Conteo que nunca lanza: exacto y, si hace timeout, estimado por el planner; null si ambos fallan. */
+  async safeCount(applyFilters = (q) => q) {
+    for (const mode of ['exact', 'planned']) {
+      const { count, error } = await applyFilters(this.from().select('id', { count: mode, head: true }));
+      if (!error && count !== null) return { count, mode };
+    }
+    return { count: null, mode: null };
   }
 
   /** Total de filas: exacto si es posible; estimado (pg_class) si el exacto hace timeout. */

@@ -55,6 +55,13 @@ export function loadConfig() {
     // Evita desastres: si un paso intenta borrar más de este % de la tabla, aborta.
     maxDeleteRatio: Number(process.env.MAX_DELETE_RATIO ?? 0.5),
 
+    // Envía la cabecera x-preserve-updated-at para que el trigger (ver
+    // sql/002_preserve_updated_at.sql) NO actualice updated_at en los cambios de
+    // este script. Sin la migración la cabecera se ignora sin efectos secundarios.
+    preserveUpdatedAt: envBool('PRESERVE_UPDATED_AT', true),
+    // Informe de salud de la tabla (conteos) al inicio y al final.
+    report: envBool('REPORT', true),
+
     // --- 1. Contenido adulto ------------------------------------------------
     adultExtraKeywords: envList('ADULT_EXTRA_KEYWORDS'),
 
@@ -67,6 +74,10 @@ export function loadConfig() {
     // --- 3. Torrents muertos ------------------------------------------------
     deadAfterDays: envInt('DEAD_AFTER_DAYS', 30),
 
+    // --- 4. Normalizador ---------------------------------------------------------
+    // Rellena quality/codec/hdr_format/channels/release_group vacíos desde el título.
+    fillMetadata: envBool('FILL_METADATA', true),
+
     // --- 5. Enriquecimiento ---------------------------------------------------
     enrichMaxTitles: envInt('ENRICH_MAX_TITLES', 400), // títulos únicos por ejecución
     anilistRpm: envInt('ANILIST_RPM', 30), // AniList: 90 rpm nominal, a veces degradado a 30
@@ -76,9 +87,16 @@ export function loadConfig() {
     anilistApiUrl: process.env.ANILIST_API_URL || 'https://graphql.anilist.co',
     tmdbApiUrl: process.env.TMDB_API_URL || 'https://api.themoviedb.org/3',
     matchThreshold: Number(process.env.MATCH_THRESHOLD ?? 0.72), // similitud mínima título↔resultado
-    // Caché de búsquedas sin resultado (evita gastar cuota de API repitiéndolas cada día).
-    enrichCacheFile: process.env.ENRICH_CACHE_FILE || '.enrich-cache.json',
-    enrichMissTtlDays: envInt('ENRICH_MISS_TTL_DAYS', 7),
+    // Solo se enriquecen torrents vivos: gastar cuota de API en muertos no aporta nada.
+    enrichMinSeeders: envInt('ENRICH_MIN_SEEDERS', 1),
+    // Reintentos con backoff exponencial usando ids_checked_at / ids_attempts de la tabla:
+    // 1er reintento tras BASE horas, luego 2×, 4×… hasta un máximo de MAX días.
+    enrichRetryBaseHours: envInt('ENRICH_RETRY_BASE_HOURS', 24),
+    enrichRetryMaxDays: envInt('ENRICH_RETRY_MAX_DAYS', 30),
+    // Presupuesto de tiempo del paso (se detiene limpiamente antes del timeout de Actions).
+    enrichMaxMinutes: envInt('ENRICH_MAX_MINUTES', 45),
+    // Copia IDs de torrents ya identificados con el mismo título+año (sin llamar a APIs).
+    enrichLocalPropagation: envBool('ENRICH_LOCAL_PROPAGATION', true),
 
     // --- 6. Deduplicador ----------------------------------------------------
     keepPerLanguage: envInt('DEDUPE_KEEP_PER_LANGUAGE', 2),

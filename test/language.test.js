@@ -23,6 +23,12 @@ const cases = [
   [{ title: 'Filme 2020 Dublado' }, 'other'],
   [{ title: 'Movie 2020 1080p', audio: ['rus'] }, 'other'],
   [{ title: 'Movie 2020 1080p', audio: ['rus', 'eng'] }, 'english'],
+  // Regresión: si `audio` guarda CÓDECS en vez de idiomas, no debe clasificarse como 'other'
+  // (con DEDUPE_OTHER_LANGUAGES=delete eso borraría torrents válidos).
+  [{ title: 'Movie.2020.1080p.BluRay.x264-GRP', audio: ['AAC', 'DTS-HD MA', 'AC3'] }, 'english'],
+  [{ title: 'Pelicula 2020 [Castellano]', audio: ['AC3', 'DTS'] }, 'spanish'],
+  [{ title: 'Movie 2020', audio: ['Atmos', '7.1'], subtitles: [] }, 'english'],
+  [{ title: 'Movie 2020', audio: [], subtitles: [] }, 'english'], // DEFAULT '{}' de la tabla
 ];
 
 for (const [input, expected] of cases) {

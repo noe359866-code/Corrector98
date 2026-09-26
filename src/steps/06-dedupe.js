@@ -1,10 +1,11 @@
 /**
  * PASO 6 — DEDUPLICADOR INTELIGENTE (TOP 2 ESPAÑOL / TOP 2 INGLÉS)
  * ------------------------------------------------------------------
- *  1) Agrupa por obra: (imdb_id | tmdb_id | anilist_id | kitsu_id) + season + episode.
+ *  1) Agrupa por obra: (imdb_id | tmdb_id) + season + episode, o
+ *     (anilist_id | kitsu_id | mal_id) + episode + absolute_episode (como consulta el addon).
  *     Las filas sin ningún id de obra NO se tocan (no hay forma segura de agruparlas).
  *  2) Clasifica cada torrent en 'spanish' / 'english' / 'other' (título + audio + subtítulos).
- *  3) Ordena por seeders DESC (desempate: tamaño DESC, id ASC → resultado determinista).
+ *  3) Ordena por seeders DESC (desempate: calidad, tamaño, id → resultado determinista).
  *  4) Elimina duplicados exactos de info_hash dentro del grupo.
  *  5) REGLA ESTRICTA: conserva los N mejores de 'spanish' y los N mejores de 'english'
  *     (N = DEDUPE_KEEP_PER_LANGUAGE, 2 por defecto) y elimina el resto.
@@ -16,31 +17,42 @@
 
 import { log } from '../lib/logger.js';
 import { classifyLanguage } from '../parsers/language.js';
+import { QUALITY_RANK, extractQuality } from '../parsers/metadata.js';
 
-const COLUMNS = 'id,imdb_id,tmdb_id,anilist_id,kitsu_id,type,season,episode,absolute_episode,title,audio,subtitles,seeders,size_bytes,info_hash';
+const COLUMNS = 'id,imdb_id,tmdb_id,anilist_id,kitsu_id,mal_id,type,season,episode,absolute_episode,title,audio,subtitles,seeders,size_bytes,info_hash,quality';
+
+/** Ranking de calidad desde la columna `quality` o, si es 'Unknown', desde el título. */
+function qualityRank(row) {
+  const q = row.quality && row.quality !== 'Unknown' ? String(row.quality) : extractQuality(row.title);
+  const normalized = /2160|4k|uhd/i.test(q || '') ? '2160p' : /1080/.test(q || '') ? '1080p' : /720/.test(q || '') ? '720p' : /480|576|sd/i.test(q || '') ? '480p' : /\b(?:cam|ts|tc)\b/i.test(q || '') ? 'CAM' : null;
+  return normalized ? QUALITY_RANK[normalized] : 1;
+}
 const has = (v) => v !== null && v !== undefined && v !== '';
 
 /**
- * Clave única de obra + temporada + episodio. `null` si la fila no tiene ningún id.
+ * Clave única de obra + episodio, alineada con los índices de consulta del addon:
+ *   imdb / tmdb  → (id, season, episode)            idx_torrents_stremio_imdb / idx_torrents_tmdb
+ *   anilist / kitsu / mal → (id, episode, absolute) idx_torrents_anilist / _kitsu / _mal
+ *     (en anime cada temporada tiene su propio id, por eso no entra `season`)
+ * `null` si la fila no tiene ningún id → nunca se deduplica.
  * Nota: los ids de TMDB se repiten entre películas y series → se incluye el tipo.
  */
 export function workKey(row) {
-  let base = null;
-  if (has(row.imdb_id)) base = `imdb:${row.imdb_id}`;
-  else if (has(row.tmdb_id)) base = `tmdb:${row.type === 'movie' ? 'movie' : 'tv'}:${row.tmdb_id}`;
-  else if (has(row.anilist_id)) base = `anilist:${row.anilist_id}`;
-  else if (has(row.kitsu_id)) base = `kitsu:${row.kitsu_id}`;
-  if (!base) return null;
-
-  const season = row.season ?? '-';
-  const episode = row.episode ?? row.absolute_episode ?? '-';
-  return `${base}|s${season}|e${episode}`;
+  const se = `s${row.season ?? '-'}|e${row.episode ?? '-'}`;
+  const anime = `e${row.episode ?? '-'}|a${row.absolute_episode ?? '-'}`;
+  if (has(row.imdb_id)) return `imdb:${row.imdb_id}|${se}`;
+  if (has(row.tmdb_id)) return `tmdb:${row.type === 'movie' ? 'movie' : 'tv'}:${row.tmdb_id}|${se}`;
+  if (has(row.anilist_id)) return `anilist:${row.anilist_id}|${anime}`;
+  if (has(row.kitsu_id)) return `kitsu:${row.kitsu_id}|${anime}`;
+  if (has(row.mal_id)) return `mal:${row.mal_id}|${anime}`;
+  return null;
 }
 
-/** Orden: más seeders primero; desempate por tamaño (mayor calidad) y por id. */
+/** Orden: más seeders; desempate por calidad (2160p > 1080p > …), tamaño e id. */
 export function compareEntries(a, b) {
   return (
     (b.seeders ?? 0) - (a.seeders ?? 0) ||
+    (b.qualityRank ?? 1) - (a.qualityRank ?? 1) ||
     (b.size ?? 0) - (a.size ?? 0) ||
     String(a.id).localeCompare(String(b.id), undefined, { numeric: true })
   );
@@ -100,7 +112,7 @@ export async function runDedupe(db, config) {
       }
       const lang = classifyLanguage(row);
       langCount[lang]++;
-      const entry = { id: row.id, seeders: row.seeders ?? 0, size: row.size_bytes ?? 0, lang, hash: row.info_hash || null };
+      const entry = { id: row.id, seeders: row.seeders ?? 0, size: row.size_bytes ?? 0, lang, hash: row.info_hash || null, qualityRank: qualityRank(row) };
       const list = groups.get(key);
       if (list) list.push(entry);
       else groups.set(key, [entry]);

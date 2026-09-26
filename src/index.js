@@ -24,6 +24,7 @@ import fs from 'node:fs/promises';
 import { loadConfig } from './config.js';
 import { Db } from './lib/db.js';
 import { log } from './lib/logger.js';
+import { takeSnapshot, compareSnapshots } from './lib/report.js';
 import { runAdultFilter } from './steps/01-adult-filter.js';
 import { runSizeFilter } from './steps/02-size-filter.js';
 import { runDeadPurge } from './steps/03-dead-purge.js';
@@ -48,13 +49,13 @@ function describe(id, r) {
     case 'size': return `${r.deleted} eliminados (${r.skippedMistyped} mal tipados preservados)`;
     case 'dead': return `${r.deleted} eliminados`;
     case 'normalize': return `${r.updated} actualizados de ${r.scanned} analizados`;
-    case 'enrich': return `${r.resolved}/${r.groups} obras resueltas; ${Object.entries(r.filled).map(([k, v]) => `${k}:${v}`).join(' ')}`;
+    case 'enrich': return `${r.resolved}/${r.groups} obras resueltas (${r.local} locales); ${Object.entries(r.filled).map(([k, v]) => `${k}:${v}`).join(' ')}`;
     case 'dedupe': return `${r.deleted} eliminados en ${r.groupsTrimmed} grupos`;
     default: return JSON.stringify(r);
   }
 }
 
-async function writeStepSummary(config, results, initial, final) {
+async function writeStepSummary(config, results, initial, final, reportRows) {
   const file = process.env.GITHUB_STEP_SUMMARY;
   if (!file) return;
   const lines = [
@@ -66,6 +67,10 @@ async function writeStepSummary(config, results, initial, final) {
     '',
     `**Filas:** ${initial} → ${final ?? 'n/d'}`,
   ];
+  if (reportRows) {
+    lines.push('', '### 📊 Salud de la tabla', '', '| Métrica | Antes | Después | Δ |', '|---|---:|---:|---:|');
+    for (const row of reportRows) lines.push(`| ${row.join(' | ')} |`);
+  }
   await fs.appendFile(file, `${lines.join('\n')}\n`);
 }
 
@@ -77,6 +82,7 @@ async function main() {
   log.info(`Corrector98 · tabla "${config.table}" · pasos: ${config.steps.join(', ')}${config.dryRun ? ' · DRY RUN' : ''}`);
   db.initialRowCount = await db.countTotal();
   log.info(`Filas iniciales: ${db.initialRowCount}`);
+  const before = config.report ? await takeSnapshot(db) : null;
 
   const results = [];
   for (const step of PIPELINE) {
@@ -101,15 +107,22 @@ async function main() {
   }
 
   const finalCount = config.dryRun ? null : await db.countTotal().catch(() => null);
+  // En dry-run nada cambia: el "después" sería idéntico, así que solo se muestra el "antes".
+  const after = config.report && !config.dryRun ? await takeSnapshot(db) : null;
+  const reportRows = before ? compareSnapshots(before, after) : null;
 
   log.info('\n══════════════ RESUMEN ══════════════');
   for (const r of results) {
     log.info(`${r.status.padEnd(2)} ${r.title.padEnd(50)} ${r.error ? `ERROR: ${r.error}` : describe(r.id, r.result)}`);
   }
   log.info(`Filas: ${db.initialRowCount} → ${finalCount ?? `(dry-run: ${db.totalDeleted} se borrarían)`}`);
+  if (reportRows) {
+    log.info('\n──────── Salud de la tabla (antes → después) ────────');
+    for (const [label, b, a, d] of reportRows) log.info(`${label.padEnd(28)} ${b.padStart(12)} → ${a.padStart(12)}   ${d}`);
+  }
   log.info(`Tiempo total: ${((Date.now() - started) / 1000).toFixed(1)}s`);
 
-  await writeStepSummary(config, results, db.initialRowCount, finalCount);
+  await writeStepSummary(config, results, db.initialRowCount, finalCount, reportRows);
 
   if (results.some((r) => r.status === '❌')) process.exitCode = 1;
 }

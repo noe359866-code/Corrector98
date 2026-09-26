@@ -4,9 +4,8 @@
  *  - type = 'series' AND size_bytes < MIN_SERIES_MB (30 MB por defecto)
  *
  * Protecciones:
- *  - size_bytes NULL nunca se borra (Postgres: NULL < x es NULL → no entra).
- *  - size_bytes = 0 se considera "desconocido" y se conserva salvo
- *    SIZE_FILTER_INCLUDE_ZERO=true.
+ *  - size_bytes = 0 es el DEFAULT de la columna = "tamaño desconocido": se conserva
+ *    salvo SIZE_FILTER_INCLUDE_ZERO=true.
  *  - Una "película" cuyo título es claramente un episodio (S01E05, "[SubsPlease] X - 05")
  *    está mal tipada: NO se borra aquí; el paso 4 (normalizador) la re-tipará y en la
  *    próxima ejecución se evaluará con el umbral correcto.

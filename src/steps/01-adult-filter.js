@@ -1,6 +1,6 @@
 /**
  * PASO 1 — FILTRO DE CONTENIDO ADULTO
- * Elimina los registros cuyo `title` contiene palabras clave de contenido adulto.
+ * Elimina los registros cuyo `title` o `title_text` contiene palabras clave de contenido adulto.
  *
  *  1) Pre-filtro en Postgres: title ILIKE ANY(patrones) → solo descargamos candidatos.
  *  2) Verificación en JS con límites de palabra + lista blanca (sin falsos positivos
@@ -13,16 +13,19 @@ import { DEFAULT_ADULT_KEYWORDS, buildAdultRegex, buildIlikePatterns, isAdultTit
 export async function runAdultFilter(db, config) {
   const keywords = [...DEFAULT_ADULT_KEYWORDS, ...config.adultExtraKeywords];
   const regex = buildAdultRegex(keywords);
-  const ilikeFilter = buildIlikePatterns(keywords).map((p) => `title.ilike.${p}`).join(',');
+  // Se revisan `title` (nombre del release) y `title_text` (título efectivo).
+  const ilikeFilter = buildIlikePatterns(keywords)
+    .flatMap((p) => [`title.ilike.${p}`, `title_text.ilike.${p}`])
+    .join(',');
 
   let candidates = 0;
   const ids = [];
   const samples = [];
 
-  for await (const page of db.scan('id,title', (q) => q.or(ilikeFilter))) {
+  for await (const page of db.scan('id,title,title_text', (q) => q.or(ilikeFilter))) {
     candidates += page.length;
     for (const row of page) {
-      if (isAdultTitle(row.title, regex)) {
+      if (isAdultTitle(row.title, regex) || isAdultTitle(row.title_text, regex)) {
         ids.push(row.id);
         if (samples.length < 5) samples.push(row.title);
       }

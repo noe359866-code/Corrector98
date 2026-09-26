@@ -16,8 +16,20 @@ const SPANISH_CODES = new Set([
   'spanish (latin america)', 'spanish (spain)', 'latin american spanish',
 ]);
 const ENGLISH_CODES = new Set(['en', 'eng', 'english', 'inglés', 'ingles', 'en-us', 'en-gb', 'en_us', 'en_gb']);
-// Japonés/chino/coreano: audio original habitual en anime/asiático → no cuenta como "otro".
-const NEUTRAL_CODES = new Set(['ja', 'jp', 'jpn', 'japanese', 'japonés', 'japones', 'zh', 'chi', 'zho', 'ko', 'kor', 'und', 'unknown', 'mul']);
+// Idiomas "otros" RECONOCIDOS. Solo estos cuentan como 'other': cualquier valor
+// desconocido del array (p. ej. códecs "AAC", "DTS", "AC3" si la columna `audio`
+// guarda códecs en vez de idiomas) se IGNORA, para no borrar torrents por error.
+// Japonés/chino/coreano no están: son el audio original habitual del anime/asiático.
+const OTHER_LANGUAGE_CODES = new Set([
+  'fr', 'fre', 'fra', 'french', 'francés', 'frances', 'vf', 'vff', 'vostfr',
+  'de', 'ger', 'deu', 'german', 'alemán', 'aleman',
+  'it', 'ita', 'italian', 'italiano',
+  'ru', 'rus', 'russian', 'ruso',
+  'pt', 'por', 'pt-br', 'pt_br', 'portuguese', 'portugués', 'portugues', 'dublado',
+  'pl', 'pol', 'polish', 'hi', 'hin', 'hindi', 'tr', 'tur', 'turkish', 'ar', 'ara', 'arabic',
+  'nl', 'dut', 'nld', 'dutch', 'sv', 'swe', 'swedish', 'cs', 'cze', 'ces', 'czech',
+  'hu', 'hun', 'hungarian', 'uk', 'ukr', 'ukrainian', 'th', 'tha', 'thai', 'vi', 'vie', 'vietnamese',
+]);
 
 // Marcas en el título que indican español (audio o subtítulos).
 const SPANISH_TITLE_RE = new RegExp(
@@ -89,9 +101,7 @@ export function classifyLanguage({ title = '', audio, subtitles } = {}) {
   if (englishAudio || ENGLISH_TITLE_RE.test(t)) return 'english';
 
   // 3) Otro idioma explícito (audio no neutro o marca en el título) sin inglés.
-  const otherAudio = audioCodes.some(
-    (c) => !SPANISH_CODES.has(c) && !ENGLISH_CODES.has(c) && !NEUTRAL_CODES.has(c),
-  );
+  const otherAudio = audioCodes.some((c) => OTHER_LANGUAGE_CODES.has(c));
   if ((otherAudio && !englishSubs) || OTHER_TITLE_RE.test(t)) return 'other';
 
   // 4) Sin marcas de idioma → escena internacional / fansub en inglés.
