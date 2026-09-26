@@ -29,7 +29,7 @@ Además: **informe de salud** con conteos antes y después, y **preservación de
    **Obligatorio antes de producción:** configurar revisores requeridos, impedir autoaprobación y restringir el entorno de producción a la rama por defecto. El YAML referencia el entorno pero **no configura esas protecciones**. No guardes la service-role como secret global del repositorio. La clave de lectura debe tener permisos reales de solo SELECT; cambiarle el nombre a una service-role no reduce sus privilegios.
 2. Revisa y aplica las migraciones necesarias en staging primero: [`001`](sql/001_recommended_indexes.sql) (índices) y [`002`](sql/002_preserve_updated_at.sql) (conservar `updated_at`). No se ejecutan automáticamente.
 3. Fusiona el PR después de pasar **CI** (Node 22/24, pruebas y auditoría de dependencias). Las Actions están fijadas por SHA y Dependabot propone actualizaciones.
-4. Ejecuta **Análisis de mantenimiento (sin escrituras)**. La programación diaria de las 04:30 UTC también es **solo análisis**. Revisa el resumen, el artefacto de auditoría y los falsos positivos en staging.
+4. Ejecuta **Análisis de mantenimiento (sin escrituras)**. La programación diaria de las 04:30 UTC también es **solo análisis**. Revisa el resumen, el artefacto de auditoría y los falsos positivos en staging. Si el análisis termina correctamente, el resumen muestra un enlace para iniciar manualmente la aplicación.
 5. Para escribir usa **Aplicar mantenimiento aprobado**, desde la rama por defecto. Indica `APPLY:torrents`, referencia del cambio, referencia del respaldo verificado, pasos y límites. El job espera las protecciones configuradas del entorno. **No se ha activado ningún permiso o entorno remoto desde este cambio de código.**
 
 ### Ejecución local
@@ -70,7 +70,7 @@ La ejecución local **no impone revisión de una segunda persona**. Para producc
 
 - Paginación por clave (`id > último`), sin OFFSET. Continúa hasta una página vacía aunque el `max_rows` de Supabase sea inferior a `PAGE_SIZE`.
 - Cada escaneo fija un ID máximo inicial; las nuevas inserciones con IDs mayores se procesan en la próxima pasada. Detecta cursores repetidos, respuestas inválidas e IDs numéricos que perderían precisión (`bigint` recibido como string sí es seguro).
-- Peticiones a Supabase con timeout (`DB_TIMEOUT_MS=30000`) y lecturas con reintentos limitados (`DB_READ_RETRIES=3`) ante fallos transitorios. Los DELETE no se reintentan automáticamente desde la aplicación.
+- Peticiones a Supabase con timeout del cliente (`DB_TIMEOUT_MS=30000`) y lecturas con reintentos limitados (`DB_READ_RETRIES=3`) ante fallos transitorios. PostgreSQL puede cancelar antes por su propio `statement_timeout`; ante timeout en la búsqueda adulta `ILIKE`, comprueba los índices trigram de [`sql/001`](sql/001_recommended_indexes.sql). Los DELETE no se reintentan automáticamente desde la aplicación.
 - El normalizador agrupa y escribe **por página**, sin acumular todas las correcciones de la tabla en memoria. Los eliminadores conservan su plan de IDs para validar el presupuesto antes de borrar; la deduplicación sigue necesitando agrupar candidatos en memoria.
 - No hay snapshot transaccional entre páginas. Los cambios externos de título/IDs durante el filtro adulto o la deduplicación no se revalidan completamente al borrar: ejecuta esos pasos en una ventana sin escrituras del scraper si necesitas evitar esa carrera.
 

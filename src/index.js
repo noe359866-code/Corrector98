@@ -75,6 +75,22 @@ async function writeStepSummary(config, results, initial, final, reportRows) {
     lines.push('', '### 📊 Salud de la tabla', '', '| Métrica | Antes | Después | Δ |', '|---|---:|---:|---:|');
     for (const row of reportRows) lines.push(`| ${row.join(' | ')} |`);
   }
+  const scanSucceeded = results.every((result) => result.status !== '❌' && result.status !== '⛔ bloqueado');
+  const repository = process.env.GITHUB_REPOSITORY;
+  if (config.dryRun && scanSucceeded && repository) {
+    const server = (process.env.GITHUB_SERVER_URL || 'https://github.com').replace(/\/$/, '');
+    const applyWorkflow = `${server}/${repository}/actions/workflows/apply.yml`;
+    lines.push(
+      '',
+      '### Siguiente paso — revisión manual',
+      '',
+      'El análisis terminó sin errores. Revisa los resultados y el artefacto de auditoría de esta ejecución. Si apruebas el plan, inicia manualmente el workflow protegido:',
+      '',
+      `[Abrir «Aplicar mantenimiento aprobado»](${applyWorkflow})`,
+      '',
+      'Este enlace no inicia ni autoriza cambios. La aplicación requiere confirmación, ticket, respaldo verificado y las aprobaciones configuradas.',
+    );
+  }
   await fs.appendFile(file, `${lines.join('\n')}\n`);
 }
 

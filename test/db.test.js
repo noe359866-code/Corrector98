@@ -104,6 +104,17 @@ test('scan: una respuesta inválida o con error no se trata como fin de tabla', 
   }
 });
 
+test('scan: statement_timeout explica diferencia con DB_TIMEOUT_MS y apunta a índices de ILIKE', async () => {
+  const { db } = fixture({ rows: rows(1), config: { dbReadRetries: 0 }, intercept(q) {
+    if (q.ascending) return { error: { code: '57014', message: 'canceling statement due to statement timeout' }, status: 500 };
+  } });
+  await assert.rejects(scanIds(db), (error) => {
+    assert.match(error.message, /statement_timeout.*no se corrige con DB_TIMEOUT_MS/);
+    assert.ok(error.message.includes('sql/001_recommended_indexes.sql'));
+    return true;
+  });
+});
+
 test('scan: reintenta una lectura transitoria sin duplicar páginas', async () => {
   let failed = false;
   const { db, state } = fixture({ rows: rows(2), config: { dbReadRetries: 1 }, intercept(q) {
