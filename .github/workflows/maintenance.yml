@@ -60,7 +60,7 @@ jobs:
           MAX_DELETE_RATIO: ${{ inputs.max_delete_ratio || vars.MAX_DELETE_RATIO || '0.5' }}
           # Ajustes opcionales vía "Repository variables" (Settings → Secrets and variables → Actions → Variables)
           DEDUPE_OTHER_LANGUAGES: ${{ vars.DEDUPE_OTHER_LANGUAGES || 'delete' }}
-          ENRICH_MAX_TITLES: ${{ vars.ENRICH_MAX_TITLES || '400' }}
+          ENRICH_MAX_TITLES: ${{ vars.ENRICH_MAX_TITLES || '0' }}
           ENRICH_MAX_MINUTES: ${{ vars.ENRICH_MAX_MINUTES || '45' }}
           FILL_METADATA: ${{ vars.FILL_METADATA || 'true' }}
           ADULT_EXTRA_KEYWORDS: ${{ vars.ADULT_EXTRA_KEYWORDS }}

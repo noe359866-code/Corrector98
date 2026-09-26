@@ -79,7 +79,7 @@ export function loadConfig() {
     fillMetadata: envBool('FILL_METADATA', true),
 
     // --- 5. Enriquecimiento ---------------------------------------------------
-    enrichMaxTitles: envInt('ENRICH_MAX_TITLES', 400), // títulos únicos por ejecución
+    enrichMaxTitles: envInt('ENRICH_MAX_TITLES', 0), // 0 = sin límite de títulos únicos por ejecución
     anilistRpm: envInt('ANILIST_RPM', 30), // AniList: 90 rpm nominal, a veces degradado a 30
     kitsuRpm: envInt('KITSU_RPM', 60),
     tmdbRpm: envInt('TMDB_RPM', 180), // TMDB tolera ~50 req/s; vamos holgados
@@ -113,6 +113,9 @@ export function loadConfig() {
   }
   if (!(config.maxDeleteRatio > 0 && config.maxDeleteRatio <= 1)) {
     throw new Error('MAX_DELETE_RATIO debe estar en el rango (0, 1].');
+  }
+  if (config.enrichMaxTitles < 0) {
+    throw new Error('ENRICH_MAX_TITLES debe ser 0 (sin límite) o un entero positivo.');
   }
   return config;
 }

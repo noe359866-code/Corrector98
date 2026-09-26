@@ -216,12 +216,9 @@ export async function runEnrich(db, config) {
   }
 
   // --- 3) APIs públicas ----------------------------------------------------------
-  const queue = pending
-    .filter((g) => !resolvedLocally.has(g.key))
-    .sort((a, b) => b.rows.length - a.rows.length) // más filas afectadas primero
-    .slice(0, config.enrichMaxTitles);
+  const queue = selectEnrichmentQueue(pending, resolvedLocally, config.enrichMaxTitles);
   stats.skippedByLimit = pending.length - resolvedLocally.size - queue.length;
-  log.info(`  Consultando APIs para ${queue.length} obras (límite ENRICH_MAX_TITLES=${config.enrichMaxTitles}, tiempo máx. ${config.enrichMaxMinutes} min)`);
+  log.info(`  Consultando APIs para ${queue.length} obras (límite ENRICH_MAX_TITLES=${config.enrichMaxTitles === 0 ? 'sin límite' : config.enrichMaxTitles}, tiempo máx. ${config.enrichMaxMinutes} min)`);
 
   let tmdbDisabled = false;
   for (const [index, g] of queue.entries()) {
@@ -391,4 +388,12 @@ async function resolveMovieOrSeries(g, found, meta, tmdb) {
     if (r.imdbId) found.imdb_id = r.imdbId;
     record(meta, 'tmdb', r.score);
   }
+}
+
+/** Prioriza las obras con más filas; 0 permite consultar todas las pendientes. */
+export function selectEnrichmentQueue(pending, resolvedLocally, maxTitles) {
+  return pending
+    .filter((g) => !resolvedLocally.has(g.key))
+    .sort((a, b) => b.rows.length - a.rows.length)
+    .slice(0, maxTitles === 0 ? undefined : maxTitles);
 }

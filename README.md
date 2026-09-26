@@ -88,7 +88,8 @@ Si una "película" pequeña tiene título de episodio (`S01E05`), está mal tipa
 2. **Propagación local** (gratis): si otro torrent ya identificado tiene el mismo título limpio, año y tipo, se copian sus IDs (`ids_source = 'local'`). Si los candidatos a donante no coinciden entre sí (obras homónimas), no se copia nada.
 3. **APIs**, una consulta por obra: `imdb_id` → TMDB `/find`, `tmdb_id` → `/external_ids`, `mal_id` → mapping de Kitsu, y si no, búsqueda por título validada por similitud y año. Para buscar se usa `title_text` si existe.
 4. **Estado en la tabla**: `ids_checked_at`, `ids_attempts` (+1), `ids_source` (`anilist+kitsu+tmdb`, `local`…) e `ids_confidence` (similitud). Las obras sin resultado se reintentan a las 24 h, luego 48 h, 96 h… hasta 30 días. Un error de red no penaliza.
-5. `ENRICH_MAX_MINUTES` detiene el paso limpiamente antes del timeout de Actions.
+5. `ENRICH_MAX_TITLES=0` (por defecto) consulta todas las obras pendientes sin el antiguo tope de 400. Se aplica a TMDB, AniList y Kitsu; un valor positivo permite fijar un tope. Si ya tienes la variable de repositorio `ENRICH_MAX_TITLES=400` en GitHub Actions, cámbiala a `0` o elimínala. Se mantienen las pausas de cada proveedor (`TMDB_RPM`, etc.): sin límite de títulos no significa peticiones ilimitadas por segundo.
+6. `ENRICH_MAX_MINUTES` detiene el paso limpiamente antes del timeout de Actions (45 minutos por defecto). Por tanto, la ejecución no es infinita: termina al completar las obras pendientes o agotar ese tiempo.
 
 ### 6. Deduplicador
 - Clave alineada con los índices del addon:
