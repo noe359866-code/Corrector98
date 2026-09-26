@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { isDueForRetry, sanitizeIds, pickLocalIds, groupKeyFor, titleKey } from '../src/steps/05-enrich.js';
+import { selectEnrichmentQueue, isDueForRetry, sanitizeIds, pickLocalIds, groupKeyFor, titleKey } from '../src/steps/05-enrich.js';
 
 const H = 3_600_000;
 const now = Date.parse('2026-09-25T12:00:00Z');
@@ -49,4 +49,17 @@ test('groupKeyFor: ids exactos antes que título', () => {
   assert.equal(groupKeyFor({ imdb_id: 'tt1' }, 'movie', 'X', 2020), 'movie|imdb:tt1');
   assert.equal(groupKeyFor({ anilist_id: 9 }, 'anime', 'X', null), 'anime|anilist:9');
   assert.equal(groupKeyFor({}, 'movie', 'The Matrix', 1999), titleKey('movie', 'Matrix', 1999));
+});
+
+test('cola sin límite: procesa más de 400 obras, excluye resueltas y prioriza filas', () => {
+  const pending = Array.from({ length: 502 }, (_, i) => ({ key: String(i), rows: Array(i + 1) }));
+  const resolved = new Set(['501']);
+  const queue = selectEnrichmentQueue(pending, resolved, 0);
+  assert.equal(queue.length, 501);
+  assert.equal(queue[0].key, '500');
+  assert.equal(queue.at(-1).key, '0');
+  assert.equal(pending[0].key, '0');
+  assert.deepEqual(selectEnrichmentQueue(pending, resolved, 2), queue.slice(0, 2));
+  assert.equal(selectEnrichmentQueue(pending, resolved, 400).length, 400);
+  assert.deepEqual(selectEnrichmentQueue([], resolved, 0), []);
 });
