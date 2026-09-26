@@ -292,7 +292,8 @@ async function persist(db, g, found, meta, nowIso, stats) {
       patch.ids_source = [...new Set(meta.sources)].join('+') || 'unknown';
       patch.ids_confidence = meta.scores.length ? Number(Math.min(...meta.scores, 1).toFixed(3)) : null;
     }
-    await db.updateByIds(patch, rowIds, 'enrich-state');
+    const result = await db.updateByIds(patch, rowIds, 'enrich-state');
+    if (result.failed) throw new Error('No se pudo persistir el estado de enriquecimiento');
   }
 }
 

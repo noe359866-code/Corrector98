@@ -27,12 +27,12 @@ export async function runAdultFilter(db, config) {
     for (const row of page) {
       if (isAdultTitle(row.title, regex) || isAdultTitle(row.title_text, regex)) {
         ids.push(row.id);
-        if (samples.length < 5) samples.push(row.title);
+        if (samples.length < 5) samples.push(row.title || row.title_text || '');
       }
     }
   }
 
-  if (samples.length) log.info(`  Ejemplos: ${samples.map((s) => `"${s.slice(0, 70)}"`).join(' | ')}`);
+  if (config.logSamples && samples.length) log.info(`  Ejemplos: ${samples.map((s) => `"${s.slice(0, 70)}"`).join(' | ')}`);
   const deleted = await db.deleteByIds(ids, 'adult');
   log.info(`  Candidatos ILIKE: ${candidates} → confirmados y eliminados: ${deleted}`);
   return { deleted, candidates };

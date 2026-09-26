@@ -22,8 +22,10 @@
 
 import fs from 'node:fs/promises';
 import { loadConfig } from './config.js';
+import { AuditLog } from './lib/audit.js';
+import { runPipeline } from './lib/pipeline.js';
 import { Db } from './lib/db.js';
-import { log } from './lib/logger.js';
+import { log, redact } from './lib/logger.js';
 import { takeSnapshot, compareSnapshots } from './lib/report.js';
 import { runAdultFilter } from './steps/01-adult-filter.js';
 import { runSizeFilter } from './steps/02-size-filter.js';
@@ -48,12 +50,14 @@ function describe(id, r) {
     case 'adult': return `${r.deleted} eliminados (de ${r.candidates} candidatos)`;
     case 'size': return `${r.deleted} eliminados (${r.skippedMistyped} mal tipados preservados)`;
     case 'dead': return `${r.deleted} eliminados`;
-    case 'normalize': return `${r.updated} actualizados de ${r.scanned} analizados`;
+    case 'normalize': return `${r.updated} actualizados de ${r.scanned} analizados; ${r.failed} fallidos`;
     case 'enrich': return `${r.resolved}/${r.groups} obras resueltas (${r.local} locales); ${Object.entries(r.filled).map(([k, v]) => `${k}:${v}`).join(' ')}`;
     case 'dedupe': return `${r.deleted} eliminados en ${r.groupsTrimmed} grupos`;
     default: return JSON.stringify(r);
   }
 }
+
+const markdownCell = (value) => redact(value).replace(/[\r\n]/g, ' ').replace(/[|`<>]/g, ' ');
 
 async function writeStepSummary(config, results, initial, final, reportRows) {
   const file = process.env.GITHUB_STEP_SUMMARY;
@@ -63,7 +67,7 @@ async function writeStepSummary(config, results, initial, final, reportRows) {
     '',
     '| Paso | Estado | Resultado | Duración |',
     '|---|---|---|---|',
-    ...results.map((r) => `| ${r.title} | ${r.status} | ${r.error ? `\`${r.error.slice(0, 120)}\`` : describe(r.id, r.result)} | ${r.seconds}s |`),
+    ...results.map((r) => `| ${r.title} | ${r.status} | ${r.error ? `\`${markdownCell(r.error).slice(0, 120)}\`` : describe(r.id, r.result)} | ${r.seconds}s |`),
     '',
     `**Filas:** ${initial} → ${final ?? 'n/d'}`,
   ];
@@ -77,58 +81,55 @@ async function writeStepSummary(config, results, initial, final, reportRows) {
 async function main() {
   const started = Date.now();
   const config = loadConfig();
-  const db = new Db(config);
+  const audit = await AuditLog.open(config.auditDir);
+  let db;
+  try {
+    db = new Db(config, null, audit);
+    await audit.record('run.start', { database: new URL(config.supabaseUrl).origin, table: config.table, dryRun: config.dryRun, steps: config.steps,
+      maxDeleteRatio: config.maxDeleteRatio, maxDeleteRows: config.maxDeleteRows,
+      changeTicket: config.changeTicket, backupReference: config.backupReference,
+      actor: process.env.GITHUB_ACTOR || 'local', commit: process.env.GITHUB_SHA || null });
+    log.info(`Auditoría: ${audit.file} · ejecución ${audit.runId}`);
 
-  log.info(`Corrector98 · tabla "${config.table}" · pasos: ${config.steps.join(', ')}${config.dryRun ? ' · DRY RUN' : ''}`);
-  db.initialRowCount = await db.countTotal();
-  log.info(`Filas iniciales: ${db.initialRowCount}`);
-  const before = config.report ? await takeSnapshot(db) : null;
+    log.info(`Corrector98 · tabla "${config.table}" · pasos: ${config.steps.join(', ')}${config.dryRun ? ' · DRY RUN' : ''}`);
+    db.initialRowCount = await db.countTotal();
+    log.info(`Filas iniciales: ${db.initialRowCount}`);
+    const before = config.report ? await takeSnapshot(db) : null;
 
-  const results = [];
-  for (const step of PIPELINE) {
-    if (!config.steps.includes(step.id)) {
-      results.push({ ...step, status: '⏭️ omitido', seconds: 0 });
-      continue;
+    const results = await runPipeline(PIPELINE, config, db, audit);
+
+    const finalCount = config.dryRun ? null : await db.countTotal().catch(() => null);
+    // En dry-run nada cambia: el "después" sería idéntico, así que solo se muestra el "antes".
+    const after = config.report && !config.dryRun ? await takeSnapshot(db) : null;
+    const reportRows = before ? compareSnapshots(before, after) : null;
+
+    log.info('\n══════════════ RESUMEN ══════════════');
+    for (const r of results) {
+      log.info(`${r.status.padEnd(2)} ${r.title.padEnd(50)} ${r.error ? `ERROR: ${r.error}` : describe(r.id, r.result)}`);
     }
-    log.group(step.title);
-    const t0 = Date.now();
-    try {
-      const result = await step.run(db, config);
-      results.push({ ...step, status: '✅', result, seconds: ((Date.now() - t0) / 1000).toFixed(1) });
-    } catch (err) {
-      // Un paso fallido no impide ejecutar los siguientes (son independientes),
-      // pero el proceso terminará con código de error para que Actions lo marque.
-      log.error(`${step.title}: ${err.message}`);
-      log.debug(err.stack);
-      results.push({ ...step, status: '❌', error: err.message, seconds: ((Date.now() - t0) / 1000).toFixed(1) });
-    } finally {
-      log.groupEnd();
+    log.info(`Filas: ${db.initialRowCount} → ${finalCount ?? (config.dryRun ? `(dry-run: ${db.totalDeleted} se borrarían)` : 'no disponible')}`);
+    if (reportRows) {
+      log.info('\n──────── Salud de la tabla (antes → después) ────────');
+      for (const [label, b, a, d] of reportRows) log.info(`${label.padEnd(28)} ${b.padStart(12)} → ${a.padStart(12)}   ${d}`);
     }
+    log.info(`Tiempo total: ${((Date.now() - started) / 1000).toFixed(1)}s`);
+
+    await writeStepSummary(config, results, db.initialRowCount, finalCount, reportRows);
+
+    const failed = results.some((r) => r.status === '❌') || (!config.dryRun && finalCount === null);
+    await audit.record('run.end', { status: failed ? 'failed' : 'success', initialCount: db.initialRowCount,
+      finalCount, deleted: db.totalDeleted, dryRun: config.dryRun, seconds: (Date.now() - started) / 1000 });
+    if (failed) process.exitCode = 1;
+  } catch (error) {
+    await audit.record('run.end', { status: 'failed', deleted: db?.totalDeleted ?? 0 }).catch(() => {});
+    throw error;
+  } finally {
+    await audit.close();
   }
-
-  const finalCount = config.dryRun ? null : await db.countTotal().catch(() => null);
-  // En dry-run nada cambia: el "después" sería idéntico, así que solo se muestra el "antes".
-  const after = config.report && !config.dryRun ? await takeSnapshot(db) : null;
-  const reportRows = before ? compareSnapshots(before, after) : null;
-
-  log.info('\n══════════════ RESUMEN ══════════════');
-  for (const r of results) {
-    log.info(`${r.status.padEnd(2)} ${r.title.padEnd(50)} ${r.error ? `ERROR: ${r.error}` : describe(r.id, r.result)}`);
-  }
-  log.info(`Filas: ${db.initialRowCount} → ${finalCount ?? `(dry-run: ${db.totalDeleted} se borrarían)`}`);
-  if (reportRows) {
-    log.info('\n──────── Salud de la tabla (antes → después) ────────');
-    for (const [label, b, a, d] of reportRows) log.info(`${label.padEnd(28)} ${b.padStart(12)} → ${a.padStart(12)}   ${d}`);
-  }
-  log.info(`Tiempo total: ${((Date.now() - started) / 1000).toFixed(1)}s`);
-
-  await writeStepSummary(config, results, db.initialRowCount, finalCount, reportRows);
-
-  if (results.some((r) => r.status === '❌')) process.exitCode = 1;
 }
 
 main().catch((err) => {
   log.error(err.message);
   log.debug(err.stack);
-  process.exit(1);
+  process.exitCode = 1;
 });

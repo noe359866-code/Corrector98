@@ -68,3 +68,42 @@ test('selectExcess: seeders null cuentan como 0', () => {
   const { remove } = selectExcess([e(1, null, 'english'), e(2, 3, 'english'), e(3, 1, 'english')], { keep: 2 });
   assert.deepEqual(remove.map((r) => r.id), [1]);
 });
+
+test('workKey: conserva episodios ambiguos y packs sin mapeo de archivo', () => {
+  const base = { imdb_id: 'tt1', type: 'series' };
+  assert.equal(workKey({ ...base }), null);
+  assert.equal(workKey({ ...base, season: 1 }), null);
+  assert.equal(workKey({ ...base, episode: 1 }), null);
+  assert.equal(workKey({ ...base, season: 1, episode: 1, title: 'Show S01 Complete' }), null);
+  assert.equal(workKey({ ...base, season: 1, episode: 1, title: 'Show S01E01-E04' }), null);
+  assert.equal(workKey({ ...base, season: 1, episode: 1, file_index: 0, title: 'Show S01E01-E04' }), 'imdb:tt1|s1|e1');
+});
+
+test('workKey: título y coordenadas en conflicto no se deduplican', () => {
+  assert.equal(workKey({ imdb_id: 'tt1', type: 'series', season: 1, episode: 1, title: 'Show S01E02' }), null);
+  assert.equal(workKey({ imdb_id: 'tt1', type: 'movie', title: 'Show S01E02' }), null);
+  assert.equal(workKey({ imdb_id: 'tt1', type: 'anime', absolute_episode: 5 }), null);
+  assert.equal(workKey({ imdb_id: 'tt1', anilist_id: 3, type: 'anime', absolute_episode: 5 }), 'anilist:3|e-|a5');
+});
+
+test('workKey: descarta IDs inválidos o redondeados', () => {
+  assert.equal(workKey({ imdb_id: 'incorrecto', tmdb_id: -1 }), null);
+  assert.equal(workKey({ tmdb_id: Number.MAX_SAFE_INTEGER + 1 }), null);
+  assert.equal(workKey({ tmdb_id: '9007199254740993', type: 'movie' }), 'tmdb:movie:9007199254740993|s-|e-');
+});
+
+test('selectExcess: un hash descartado no elimina su única copia aceptable', () => {
+  const { keep, remove } = selectExcess([e(1, 100, 'other', 'same'), e(2, 10, 'english', 'same')]);
+  assert.deepEqual(keep.map((x) => x.id), [2]);
+  assert.deepEqual(remove, [{ id: 1, reason: 'other_language' }]);
+});
+
+test('selectExcess: archivos distintos del mismo torrent no son hashes duplicados', () => {
+  const entries = [{ ...e(1, 10, 'english', 'same'), fileIndex: 0 }, { ...e(2, 9, 'english', 'same'), fileIndex: 1 }];
+  assert.equal(selectExcess(entries).remove.length, 0);
+});
+
+test('selectExcess: rechaza una política que conservaría cero copias', () => {
+  assert.throws(() => selectExcess([e(1, 1, 'english')], { keep: 0 }), /inválida/);
+  assert.throws(() => selectExcess([], { otherPolicy: 'typo' }), /inválida/);
+});
