@@ -4,6 +4,7 @@ export const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 /** Divide un array en trozos de tamaño `size`. */
 export function chunk(array, size) {
+  if (!Number.isSafeInteger(size) || size < 1) throw new Error('El tamaño de lote debe ser un entero positivo');
   const out = [];
   for (let i = 0; i < array.length; i += size) out.push(array.slice(i, i + size));
   return out;
@@ -14,15 +15,26 @@ export function chunk(array, size) {
  * promesas simultáneas. Devuelve los resultados en el mismo orden.
  */
 export async function mapPool(items, concurrency, worker) {
+  if (!Number.isSafeInteger(concurrency) || concurrency < 1) throw new Error('La concurrencia debe ser un entero positivo');
   const results = new Array(items.length);
   let cursor = 0;
-  const runners = Array.from({ length: Math.max(1, Math.min(concurrency, items.length)) }, async () => {
-    while (cursor < items.length) {
+  let failed = false;
+  let failure;
+  const runners = Array.from({ length: Math.min(concurrency, items.length) }, async () => {
+    while (!failed && cursor < items.length) {
       const index = cursor++;
-      results[index] = await worker(items[index], index);
+      try {
+        results[index] = await worker(items[index], index);
+      } catch (error) {
+        if (!failed) failure = error;
+        failed = true;
+      }
     }
   });
+  // Drenar peticiones ya enviadas antes de cerrar la auditoría o salir del paso.
+  // Promise.all sobre workers que rechazan dejaría mutaciones en segundo plano.
   await Promise.all(runners);
+  if (failed) throw failure;
   return results;
 }
 

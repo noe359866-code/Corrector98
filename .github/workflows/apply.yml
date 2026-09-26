@@ -1,0 +1,93 @@
+name: Aplicar mantenimiento aprobado
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirmation:
+        description: 'Escribe APPLY:torrents para autorizar escrituras'
+        type: string
+        required: true
+      change_ticket:
+        description: 'Referencia del cambio aprobado (sin secretos)'
+        type: string
+        required: true
+      backup_reference:
+        description: 'Referencia del respaldo cuya restauracion has verificado'
+        type: string
+        required: true
+      steps:
+        description: 'Pasos revisados en la simulacion'
+        type: string
+        default: 'adult,size,dead,normalize,enrich,dedupe'
+      max_delete_ratio:
+        description: 'Fraccion maxima acumulada de borrado'
+        type: string
+        default: '0.1'
+      max_delete_rows:
+        description: 'Numero maximo absoluto de borrados'
+        type: string
+        default: '1000'
+
+concurrency:
+  group: torrents-maintenance
+  cancel-in-progress: false
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - run: npm test
+      - run: npm audit --omit=dev --audit-level=high
+
+  apply:
+    needs: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    # Configurar required reviewers, prevent self-review y restriccion de rama en GitHub.
+    environment: production-maintenance
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - name: Aplicar cambio autorizado
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          TMDB_API_KEY: ${{ secrets.TMDB_API_KEY }}
+          DRY_RUN: 'false'
+          APPLY_CONFIRMATION: ${{ inputs.confirmation }}
+          CHANGE_TICKET: ${{ inputs.change_ticket }}
+          BACKUP_REFERENCE: ${{ inputs.backup_reference }}
+          STEPS: ${{ inputs.steps }}
+          MAX_DELETE_RATIO: ${{ inputs.max_delete_ratio }}
+          MAX_DELETE_ROWS: ${{ inputs.max_delete_rows }}
+          DEDUPE_OTHER_LANGUAGES: ${{ vars.DEDUPE_OTHER_LANGUAGES || 'keep' }}
+          ENRICH_MAX_TITLES: ${{ vars.ENRICH_MAX_TITLES || '0' }}
+          ENRICH_MAX_MINUTES: ${{ vars.ENRICH_MAX_MINUTES || '45' }}
+          ADULT_EXTRA_KEYWORDS: ${{ vars.ADULT_EXTRA_KEYWORDS }}
+        run: npm start
+      - name: Conservar auditoria (incluso ante fallo)
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: apply-audit-${{ github.run_id }}-${{ github.run_attempt }}
+          path: audit/*.jsonl
+          retention-days: 30
+          if-no-files-found: warn

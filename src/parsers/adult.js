@@ -19,7 +19,7 @@ export const DEFAULT_ADULT_KEYWORDS = [
   'digital playground', 'fakehub', 'fake taxi', 'teamskeet', 'pervmom', 'jav uncensored',
   'jav censored', 'sexo explicito', 'sexo explícito', 'xvideos', 'xhamster', 'youporn', 'redtube',
   'rule34',
-]
+];
 
 /** Excepciones: títulos legítimos que contienen palabras clave. */
 const WHITELIST = [
@@ -29,15 +29,26 @@ const WHITELIST = [
   /xxxtentacion/i, // documental sobre el rapero
 ];
 
+function cleanKeywords(keywords) {
+  return [...new Set(keywords.map((keyword) => {
+    const value = String(keyword).trim();
+    if (!/[\p{L}\p{N}]/u.test(value)) {
+      throw new Error('Las palabras clave adultas deben contener letras o números; no se permiten comodines solos');
+    }
+    return value;
+  }))];
+}
+
 const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
 /** Construye la regex de detección con límites de palabra flexibles (., _, -, espacios). */
 export function buildAdultRegex(keywords) {
-  const parts = keywords.map((k) => {
+  const parts = cleanKeywords(keywords).map((k) => {
     const prefix = k.trim().endsWith('*');
     const body = k.trim().replace(/\*$/, '').split(/\s+/).map(escapeRe).join('[\\s._-]*');
     return prefix ? `${body}[a-záéíóúñ]*` : body;
   });
+  if (!parts.length) return /(?!)/; // lista vacía: nunca coincide
   // (?<![a-z0-9]) / (?![a-z]) = límites de palabra que también funcionan con "." y "_"
   return new RegExp(`(?<![a-z0-9])(?:${parts.join('|')})(?![a-z])`, 'i');
 }
@@ -48,9 +59,9 @@ export function buildAdultRegex(keywords) {
  */
 export function buildIlikePatterns(keywords) {
   const set = new Set();
-  for (const k of keywords) {
-    const core = k.trim().toLowerCase().replace(/\*$/, '').replace(/[^a-z0-9ñáéíóú]+/g, '%');
-    if (core.length >= 3) set.add(core);
+  for (const k of cleanKeywords(keywords)) {
+    const core = k.trim().toLowerCase().replace(/\*$/, '').replace(/[^\p{L}\p{N}]+/gu, '%');
+    if (core.length > 0) set.add(core);
   }
   // Quita patrones redundantes: '%porn%' ya cubre '%pornograf%'.
   const cores = [...set];
@@ -65,7 +76,9 @@ export function buildIlikePatterns(keywords) {
  * @returns {boolean}
  */
 export function isAdultTitle(title, regex) {
-  if (!title) return false;
-  if (!regex.test(title)) return false;
-  return !WHITELIST.some((re) => re.test(title));
+  if (typeof title !== 'string' || !title) return false;
+  // La excepción solo neutraliza su propio término; no oculta otras señales.
+  const remaining = WHITELIST.reduce((text, re) => text.replace(re, ' '), title);
+  regex.lastIndex = 0;
+  return regex.test(remaining);
 }

@@ -11,17 +11,32 @@
  *    seguridad (MAX_DELETE_RATIO) para evitar vaciar la tabla por un bug.
  */
 
+import { randomUUID } from 'node:crypto';
+import { assertApplyAuthorized } from './policy.js';
 import { createClient } from '@supabase/supabase-js';
-import { chunk, mapPool } from './utils.js';
+import { chunk, mapPool, sleep } from './utils.js';
 import { log } from './logger.js';
 
+// Postgres bigint no se puede redondear: es preferible abortar a borrar otro id.
+function idKey(id) {
+  if ((typeof id === 'number' && Number.isSafeInteger(id)) ||
+      (typeof id === 'string' && /^-?\d+$/.test(id))) return BigInt(id).toString();
+  throw new Error(`ID inválido o fuera de la precisión segura: ${String(id)}`);
+}
+
 export class Db {
-  constructor(config) {
+  constructor(config, client = null, audit = null) {
     this.config = config;
+    this.audit = audit;
+    this.writesBlocked = false;
     this.table = config.table;
-    this.client = createClient(config.supabaseUrl, config.supabaseKey, {
+    this.client = client ?? createClient(config.supabaseUrl, config.supabaseKey, {
       auth: { persistSession: false, autoRefreshToken: false },
       global: {
+        fetch: (input, init = {}) => {
+          const timeout = AbortSignal.timeout(config.dbTimeoutMs ?? 30_000);
+          return fetch(input, { ...init, signal: init.signal ? AbortSignal.any([init.signal, timeout]) : timeout });
+        },
         headers: {
           'x-application-name': 'corrector98-maintenance',
           // Leída por el trigger de updated_at (sql/002_preserve_updated_at.sql) vía
@@ -33,6 +48,9 @@ export class Db {
     });
     this.initialRowCount = null;
     this.totalDeleted = 0;
+    this.simulatedDeleted = new Set();
+    this.deleteQueue = Promise.resolve();
+    this.deletionBlocked = false;
   }
 
   /** Query builder base sobre la tabla configurada. */
@@ -40,91 +58,180 @@ export class Db {
     return this.client.from(this.table);
   }
 
-  /** Cuenta filas (opcionalmente filtradas) sin descargar datos. */
-  async count(applyFilters = (q) => q) {
-    const { count, error } = await applyFilters(
-      this.from().select('id', { count: 'exact', head: true }),
-    );
-    if (error) throw new Error(`Error contando filas: ${error.message}`);
-    return count ?? 0;
+  /** Única puerta para mutaciones: autorización + intención durable + recibo. */
+  async write(makeQuery, { operation, ids, reason, fields = [] }) {
+    assertApplyAuthorized(this.config);
+    if (!this.audit || this.audit.failed || this.writesBlocked) {
+      throw new Error('Escrituras bloqueadas: falta auditoría o hubo un fallo anterior');
+    }
+    const operationId = randomUUID();
+    const details = { operationId, operation, table: this.table, ids: ids.map(idKey), reason, fields };
+    try {
+      await this.audit.record('mutation.intent', details);
+      // Otra operación concurrente pudo fallar mientras se persistía la intención.
+      if (this.writesBlocked || this.audit.failed) throw new Error('Escrituras bloqueadas');
+      const result = await makeQuery();
+      const validCount = Number.isSafeInteger(result.count) && result.count >= 0 && result.count <= ids.length;
+      if (!result.error && !validCount) throw new Error('El servidor no devolvió un conteo de borrado/actualización válido');
+      if (!result.error && operation === 'delete') this.totalDeleted += result.count;
+      // Solo las violaciones SQL de integridad garantizan rollback y permiten
+      // aislar filas del lote. Un timeout o error de transporte es ambiguo.
+      if (result.error && !/^23[0-9A-Z]{3}$/.test(result.error.code ?? '')) this.writesBlocked = true;
+      await this.audit.record('mutation.result', { operationId,
+        outcome: result.error ? (this.writesBlocked ? 'unknown' : 'rejected') : 'confirmed',
+        count: result.error ? null : result.count,
+        errorCode: /^[0-9A-Z]{5}$/.test(result.error?.code ?? '') ? result.error.code : null });
+      return result;
+    } catch (error) {
+      this.writesBlocked = true;
+      // No se presume rollback: una intención sin recibo exige reconciliación.
+      throw error;
+    }
   }
 
-  /** Conteo que nunca lanza: exacto y, si hace timeout, estimado por el planner; null si ambos fallan. */
+  /** Solo reintentamos lecturas: un DELETE con timeout puede haberse confirmado. */
+  async read(makeQuery) {
+    const retries = this.config.dbReadRetries ?? 3;
+    for (let attempt = 0; ; attempt++) {
+      let result;
+      try {
+        result = await makeQuery();
+      } catch (error) {
+        result = { error: { message: error.message }, status: 0 };
+      }
+      const transient = result.error && (
+        result.status === 0 || [408, 429, 500, 502, 503, 504].includes(result.status) ||
+        ['57014', '40001', '40P01'].includes(result.error.code)
+      );
+      if (!transient || attempt >= retries) return result;
+      const delay = Math.min(10_000, 500 * 2 ** attempt);
+      log.debug(`Lectura ${this.table}: reintento ${attempt + 1} en ${delay} ms`);
+      await sleep(delay);
+    }
+  }
+
+  /** Cuenta filas exactamente. Un conteo desconocido nunca equivale a cero. */
+  async count(applyFilters = (q) => q) {
+    const { count, error } = await this.read(() => applyFilters(
+      this.from().select('id', { count: 'exact', head: true }),
+    ));
+    if (error || !Number.isSafeInteger(count) || count < 0) {
+      throw new Error(`Error contando filas: ${error?.message ?? 'conteo exacto no disponible'}`);
+    }
+    return count;
+  }
+
+  /** Las estimaciones solo sirven para informes, nunca como presupuesto de borrado. */
   async safeCount(applyFilters = (q) => q) {
     for (const mode of ['exact', 'planned']) {
-      const { count, error } = await applyFilters(this.from().select('id', { count: mode, head: true }));
-      if (!error && count !== null) return { count, mode };
+      const { count, error } = await this.read(() => applyFilters(this.from().select('id', { count: mode, head: true })));
+      if (!error && Number.isSafeInteger(count) && count >= 0) return { count, mode };
     }
     return { count: null, mode: null };
   }
 
-  /** Total de filas: exacto si es posible; estimado (pg_class) si el exacto hace timeout. */
   async countTotal() {
-    for (const mode of ['exact', 'estimated']) {
-      const { count, error } = await this.from().select('id', { count: mode, head: true });
-      if (!error && count !== null) return count;
-      log.debug(`count(${mode}) falló: ${error?.message}`);
-    }
-    throw new Error(`No se pudo contar la tabla "${this.table}". ¿Existe y la key tiene permisos?`);
+    return this.count();
   }
 
   /**
-   * Generador asíncrono que recorre la tabla por páginas usando keyset pagination.
-   * @param {string} columns  Columnas a seleccionar (debe incluir `id`).
-   * @param {(q) => q} applyFilters  Callback para añadir filtros PostgREST.
-   * @yields {object[]} página de filas
+   * Keyset acotado al id máximo inicial: las inserciones posteriores se dejan
+   * para el próximo escaneo. Una página corta NO implica fin (max_rows de
+   * PostgREST puede ser menor que PAGE_SIZE). Solo termina con página vacía.
+   * No es una instantánea transaccional: otras columnas pueden cambiar.
    */
   async *scan(columns, applyFilters = (q) => q) {
+    const { data: ceiling, error: ceilingError } = await this.read(() =>
+      this.from().select('id').order('id', { ascending: false }).limit(1));
+    if (ceilingError) throw new Error(`Error iniciando escaneo ${this.table}: ${ceilingError.message}`);
+    if (!Array.isArray(ceiling)) throw new Error('Respuesta de escaneo inválida');
+    if (!ceiling.length) return;
+    const maxId = idKey(ceiling[0].id);
     let lastId = null;
     for (;;) {
-      let query = this.from().select(columns).order('id', { ascending: true }).limit(this.config.pageSize);
-      if (lastId !== null) query = query.gt('id', lastId);
-      query = applyFilters(query);
-
-      const { data, error } = await query;
+      const { data, error } = await this.read(() => {
+        let query = this.from().select(columns).order('id', { ascending: true })
+          .limit(this.config.pageSize).lte('id', maxId);
+        if (lastId !== null) query = query.gt('id', lastId);
+        return applyFilters(query);
+      });
       if (error) throw new Error(`Error leyendo ${this.table}: ${error.message}`);
-      if (!data || data.length === 0) return;
+      if (!Array.isArray(data)) throw new Error('Respuesta de escaneo inválida');
+      if (!data.length) return;
 
-      yield data;
-      lastId = data[data.length - 1].id;
-      if (data.length < this.config.pageSize) return;
+      // Valida ANTES de entregar la página; evita bucles y bigint redondeados.
+      for (const row of data) {
+        const id = idKey(row.id);
+        if ((lastId !== null && BigInt(id) <= BigInt(lastId)) || BigInt(id) > BigInt(maxId)) {
+          throw new Error('El cursor del escaneo no avanza o excede el límite inicial');
+        }
+        lastId = id;
+      }
+      const visible = this.config.dryRun
+        ? data.filter((row) => !this.simulatedDeleted.has(idKey(row.id)))
+        : data;
+      if (visible.length) yield visible;
     }
   }
 
+  /** Serializa borrados para que llamadas concurrentes compartan el mismo tope. */
+  deleteByIds(ids, reason, applyFilters = (q) => q) {
+    const task = this.deleteQueue.then(() => this.deleteIds(ids, reason, applyFilters));
+    this.deleteQueue = task.catch(() => {});
+    return task;
+  }
+
   /**
-   * Borra filas por id en lotes. En DRY_RUN solo informa.
-   * @param {Array<string|number>} ids
-   * @param {string} reason  Etiqueta para el log.
-   * @returns {Promise<number>} filas borradas (o que se borrarían en dry-run)
+   * Valida todo el plan antes del primer lote. Cada lote confirmado se suma
+   * inmediatamente. Ante un error de escritura se bloquean los siguientes
+   * borrados: la respuesta fallida podría ocultar un commit ya realizado.
+   * applyFilters revalida las condiciones en el propio DELETE (muertos/tamaño).
    */
-  async deleteByIds(ids, reason) {
-    const unique = [...new Set(ids)];
-    if (unique.length === 0) return 0;
-
-    // Freno de emergencia: ningún paso debe borrar más de X% de la tabla.
-    if (this.initialRowCount) {
-      const ratio = (this.totalDeleted + unique.length) / this.initialRowCount;
-      if (ratio > this.config.maxDeleteRatio) {
-        throw new Error(
-          `[${reason}] Abortado por seguridad: se borraría el ${(ratio * 100).toFixed(1)}% de la tabla ` +
-          `(límite MAX_DELETE_RATIO=${this.config.maxDeleteRatio}). Revisa con DRY_RUN=true.`,
-        );
-      }
+  async deleteIds(ids, reason, applyFilters) {
+    const unique = [...new Set(ids.map(idKey))]
+      .filter((id) => !this.simulatedDeleted.has(id));
+    if (!unique.length) return 0;
+    if (this.deletionBlocked) throw new Error(`[${reason}] Borrados bloqueados tras un error anterior.`);
+    const initial = this.initialRowCount;
+    const limit = this.config.maxDeleteRatio;
+    if (!Number.isSafeInteger(initial) || initial < 0 || !(limit > 0 && limit <= 1)) {
+      throw new Error(`[${reason}] Se requiere un conteo inicial exacto y un límite válido antes de borrar.`);
     }
-
+    const absoluteLimit = this.config.maxDeleteRows ?? 1000;
+    if (!Number.isSafeInteger(absoluteLimit) || absoluteLimit < 1) throw new Error('MAX_DELETE_ROWS inválido');
+    const budget = Math.min(Math.floor(initial * limit), absoluteLimit);
+    await this.audit?.record('delete.plan', { reason, candidates: unique.length, budget, alreadyDeleted: this.totalDeleted,
+      allowed: this.totalDeleted + unique.length <= budget });
+    if (this.totalDeleted + unique.length > budget) {
+      throw new Error(
+        `[${reason}] Abortado por seguridad: ${this.totalDeleted + unique.length} filas superarían ` +
+        `el límite de ${budget} (MAX_DELETE_RATIO=${limit}). Revisa con DRY_RUN=true.`,
+      );
+    }
     if (this.config.dryRun) {
       log.info(`  [dry-run] ${reason}: se borrarían ${unique.length} filas`);
+      unique.forEach((id) => this.simulatedDeleted.add(id));
       this.totalDeleted += unique.length;
       return unique.length;
     }
 
     let deleted = 0;
     for (const batch of chunk(unique, this.config.deleteChunkSize)) {
-      const { error, count } = await this.from().delete({ count: 'exact' }).in('id', batch);
-      if (error) throw new Error(`[${reason}] Error borrando lote: ${error.message}`);
-      deleted += count ?? batch.length;
+      try {
+        const { error, count } = await this.write(
+          () => applyFilters(this.from().delete({ count: 'exact' }).in('id', batch)),
+          { operation: 'delete', ids: batch, reason },
+        );
+        if (error) throw new Error(error.message);
+        if (!Number.isSafeInteger(count) || count < 0 || count > batch.length) {
+          throw new Error('El servidor no devolvió un conteo de borrado válido');
+        }
+        deleted += count;
+      } catch (error) {
+        this.deletionBlocked = true;
+        throw new Error(`[${reason}] Error borrando lote (${deleted} confirmados): ${error.message}. Borrados posteriores bloqueados.`);
+      }
     }
-    this.totalDeleted += deleted;
     return deleted;
   }
 
@@ -133,7 +240,7 @@ export class Db {
    * Los errores por fila (p. ej. violación de UNIQUE) se registran y no detienen el proceso.
    * @returns {Promise<{updated:number, failed:number}>}
    */
-  async updateMany(updates, reason) {
+  async updateMany(updates, reason, applyFilters = (q) => q) {
     if (updates.length === 0) return { updated: 0, failed: 0 };
     if (this.config.dryRun) {
       log.info(`  [dry-run] ${reason}: se actualizarían ${updates.length} filas`);
@@ -143,12 +250,17 @@ export class Db {
     let updated = 0;
     let failed = 0;
     await mapPool(updates, this.config.updateConcurrency, async ({ id, patch }) => {
-      const { error } = await this.from().update(patch).eq('id', id);
-      if (error) {
+      try {
+        const { error, count } = await this.write(
+          () => applyFilters(this.from().update(patch, { count: 'exact' }).eq('id', id)),
+          { operation: 'update', ids: [id], reason, fields: Object.keys(patch) },
+        );
+        if (error) throw new Error(error.message);
+        if (!Number.isSafeInteger(count) || count < 0 || count > 1) throw new Error('Conteo de actualización inválido');
+        updated += count;
+      } catch (error) {
         failed++;
         log.debug(`[${reason}] id=${id} no actualizado: ${error.message}`);
-      } else {
-        updated++;
       }
     });
     if (failed) log.warn(`[${reason}] ${failed} filas no se pudieron actualizar (ver DEBUG=1).`);
@@ -161,20 +273,25 @@ export class Db {
    * para aislar el problema sin perder el resto del lote.
    * @returns {Promise<{updated:number, failed:number}>}
    */
-  async updateByIds(patch, ids, reason) {
+  async updateByIds(patch, ids, reason, applyFilters = (q) => q) {
     if (!ids.length) return { updated: 0, failed: 0 };
     if (this.config.dryRun) return { updated: ids.length, failed: 0 };
 
     let updated = 0;
     let failed = 0;
     for (const batch of chunk(ids, this.config.deleteChunkSize)) {
-      const { error, count } = await this.from().update(patch, { count: 'exact' }).in('id', batch);
+      const { error, count } = await this.write(
+        () => applyFilters(this.from().update(patch, { count: 'exact' }).in('id', batch)),
+        { operation: 'update', ids: batch, reason, fields: Object.keys(patch) },
+      );
       if (!error) {
-        updated += count ?? batch.length;
+        if (Number.isSafeInteger(count) && count >= 0 && count <= batch.length) updated += count;
+        else failed += batch.length;
         continue;
       }
+      if (this.writesBlocked) throw new Error(`[${reason}] Escritura fallida con resultado incierto; ejecución detenida`);
       log.debug(`[${reason}] lote fallido (${error.message}); reintentando fila a fila`);
-      const res = await this.updateMany(batch.map((id) => ({ id, patch })), reason);
+      const res = await this.updateMany(batch.map((id) => ({ id, patch })), reason, applyFilters);
       updated += res.updated;
       failed += res.failed;
     }
@@ -190,13 +307,12 @@ export class Db {
     if (this.config.dryRun) return ids.length;
     let total = 0;
     for (const batch of chunk(ids, this.config.deleteChunkSize)) {
-      const { error, count } = await this.from()
-        .update({ [column]: value }, { count: 'exact' })
-        .in('id', batch)
-        .is(column, null);
+      const { error, count } = await this.write(
+        () => this.from().update({ [column]: value }, { count: 'exact' }).in('id', batch).is(column, null),
+        { operation: 'update', ids: batch, reason: 'enrich-fill', fields: [column] },
+      );
       if (error) {
-        log.debug(`fillNullColumn(${column}) falló: ${error.message}`);
-        continue;
+        throw new Error(`fillNullColumn(${column}) falló; no se marcará la obra como completada.`);
       }
       total += count ?? 0;
     }

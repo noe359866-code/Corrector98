@@ -40,3 +40,20 @@ test('patrones ILIKE sin redundancias y con comodines en separadores', () => {
   assert.ok(!patterns.includes('%pornograf%')); // cubierto por %porn%
   assert.ok(patterns.includes('%naughty%america%'));
 });
+
+test('keywords: lista vacía no detecta nada y comodines solos se rechazan', () => {
+  assert.equal(isAdultTitle('Una película', buildAdultRegex([])), false);
+  for (const keyword of ['', '*', '***', '%', '...']) {
+    assert.throws(() => buildAdultRegex([keyword]), /letras o números/);
+    assert.throws(() => buildIlikePatterns([keyword]), /letras o números/);
+  }
+});
+
+test('keywords: términos personalizados cortos también entran en el prefiltro', () => {
+  assert.ok(buildIlikePatterns(['ab']).includes('%ab%'));
+});
+
+test('lista blanca no oculta otras señales adultas del mismo título', () => {
+  assert.equal(isAdultTitle('xXx.2002.Brazzers.Scene', re), true);
+  assert.equal(isAdultTitle('Hentai Ouji NSFW collection', re), true);
+});

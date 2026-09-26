@@ -17,9 +17,10 @@
 
 import { log } from '../lib/logger.js';
 import { classifyLanguage } from '../parsers/language.js';
+import { parseTitle } from '../parsers/title-parser.js';
 import { QUALITY_RANK, extractQuality } from '../parsers/metadata.js';
 
-const COLUMNS = 'id,imdb_id,tmdb_id,anilist_id,kitsu_id,mal_id,type,season,episode,absolute_episode,title,audio,subtitles,seeders,size_bytes,info_hash,quality';
+const COLUMNS = 'id,imdb_id,tmdb_id,anilist_id,kitsu_id,mal_id,type,season,episode,absolute_episode,title,audio,subtitles,seeders,size_bytes,info_hash,quality,file_index';
 
 /** Ranking de calidad desde la columna `quality` o, si es 'Unknown', desde el título. */
 function qualityRank(row) {
@@ -27,7 +28,9 @@ function qualityRank(row) {
   const normalized = /2160|4k|uhd/i.test(q || '') ? '2160p' : /1080/.test(q || '') ? '1080p' : /720/.test(q || '') ? '720p' : /480|576|sd/i.test(q || '') ? '480p' : /\b(?:cam|ts|tc)\b/i.test(q || '') ? 'CAM' : null;
   return normalized ? QUALITY_RANK[normalized] : 1;
 }
-const has = (v) => v !== null && v !== undefined && v !== '';
+const validId = (v) => (typeof v === 'number' && Number.isSafeInteger(v) && v > 0) ||
+  (typeof v === 'string' && /^[1-9]\d*$/.test(v));
+const coordinate = (v) => Number.isSafeInteger(v) && v >= 0;
 
 /**
  * Clave única de obra + episodio, alineada con los índices de consulta del addon:
@@ -38,13 +41,24 @@ const has = (v) => v !== null && v !== undefined && v !== '';
  * Nota: los ids de TMDB se repiten entre películas y series → se incluye el tipo.
  */
 export function workKey(row) {
+  const parsed = parseTitle(row.title);
+  // No comparar packs enteros con episodios ni agrupar episodios desconocidos.
+  // Un pack solo es comparable cuando la fila identifica un archivo/episodio.
+  if (parsed.isPack && (!coordinate(row.file_index) || !coordinate(row.episode))) return null;
+  if (row.type === 'series' && (!coordinate(row.season) || !coordinate(row.episode))) return null;
+  if (row.type === 'anime' && !coordinate(row.episode) && !coordinate(row.absolute_episode)) return null;
+  if (parsed.episode !== null && !parsed.isPack && row.episode !== parsed.episode) return null;
+  if (parsed.explicitSeason && !parsed.isMultiSeason && row.season !== parsed.season) return null;
+  if (row.type === 'movie' && (parsed.type === 'series' || parsed.type === 'anime')) return null;
+
   const se = `s${row.season ?? '-'}|e${row.episode ?? '-'}`;
   const anime = `e${row.episode ?? '-'}|a${row.absolute_episode ?? '-'}`;
-  if (has(row.imdb_id)) return `imdb:${row.imdb_id}|${se}`;
-  if (has(row.tmdb_id)) return `tmdb:${row.type === 'movie' ? 'movie' : 'tv'}:${row.tmdb_id}|${se}`;
-  if (has(row.anilist_id)) return `anilist:${row.anilist_id}|${anime}`;
-  if (has(row.kitsu_id)) return `kitsu:${row.kitsu_id}|${anime}`;
-  if (has(row.mal_id)) return `mal:${row.mal_id}|${anime}`;
+  const sceneCoordinates = row.type !== 'anime' || (coordinate(row.season) && coordinate(row.episode));
+  if (sceneCoordinates && /^tt[0-9]+$/.test(row.imdb_id ?? '')) return `imdb:${row.imdb_id}|${se}`;
+  if (sceneCoordinates && validId(row.tmdb_id)) return `tmdb:${row.type === 'movie' ? 'movie' : 'tv'}:${row.tmdb_id}|${se}`;
+  if (validId(row.anilist_id)) return `anilist:${row.anilist_id}|${anime}`;
+  if (validId(row.kitsu_id)) return `kitsu:${row.kitsu_id}|${anime}`;
+  if (validId(row.mal_id)) return `mal:${row.mal_id}|${anime}`;
   return null;
 }
 
@@ -65,6 +79,9 @@ export function compareEntries(a, b) {
  * @returns {{keep: Array, remove: Array<{id, reason:string}>}}
  */
 export function selectExcess(entries, { keep = 2, otherPolicy = 'delete' } = {}) {
+  if (!Number.isSafeInteger(keep) || keep < 1 || !['delete', 'keep'].includes(otherPolicy)) {
+    throw new Error('Política de deduplicación inválida');
+  }
   const sorted = [...entries].sort(compareEntries);
   const kept = [];
   const remove = [];
@@ -72,22 +89,23 @@ export function selectExcess(entries, { keep = 2, otherPolicy = 'delete' } = {})
   const perLang = { spanish: 0, english: 0 };
 
   for (const entry of sorted) {
-    const hash = entry.hash ? String(entry.hash).toLowerCase() : null;
+    const hash = entry.hash ? `${String(entry.hash).trim().toLowerCase()}|f${entry.fileIndex ?? '-'}` : null;
     if (hash && seenHashes.has(hash)) {
       remove.push({ id: entry.id, reason: 'duplicate_hash' });
       continue;
     }
-    if (hash) seenHashes.add(hash);
 
     if (entry.lang === 'spanish' || entry.lang === 'english') {
       if (perLang[entry.lang] < keep) {
         perLang[entry.lang]++;
         kept.push(entry);
+        if (hash) seenHashes.add(hash);
       } else {
         remove.push({ id: entry.id, reason: `excess_${entry.lang}` });
       }
     } else if (otherPolicy === 'keep') {
       kept.push(entry);
+      if (hash) seenHashes.add(hash);
     } else {
       remove.push({ id: entry.id, reason: 'other_language' });
     }
@@ -99,7 +117,7 @@ export async function runDedupe(db, config) {
   /** @type {Map<string, Array>} */
   const groups = new Map();
   let scanned = 0;
-  let withoutId = 0;
+  let skippedUnsafe = 0;
   const langCount = { spanish: 0, english: 0, other: 0 };
 
   for await (const page of db.scan(COLUMNS)) {
@@ -107,12 +125,12 @@ export async function runDedupe(db, config) {
     for (const row of page) {
       const key = workKey(row);
       if (!key) {
-        withoutId++;
+        skippedUnsafe++;
         continue;
       }
       const lang = classifyLanguage(row);
       langCount[lang]++;
-      const entry = { id: row.id, seeders: row.seeders ?? 0, size: row.size_bytes ?? 0, lang, hash: row.info_hash || null, qualityRank: qualityRank(row) };
+      const entry = { id: row.id, seeders: row.seeders ?? 0, size: row.size_bytes ?? 0, lang, hash: row.info_hash || null, fileIndex: row.file_index, qualityRank: qualityRank(row) };
       const list = groups.get(key);
       if (list) list.push(entry);
       else groups.set(key, [entry]);
@@ -135,7 +153,7 @@ export async function runDedupe(db, config) {
     }
   }
 
-  log.info(`  Filas analizadas: ${scanned} (sin id de obra, ignoradas: ${withoutId})`);
+  log.info(`  Filas analizadas: ${scanned} (sin identidad/episodio seguro, preservadas: ${skippedUnsafe})`);
   log.info(`  Idiomas → spanish: ${langCount.spanish}, english: ${langCount.english}, other: ${langCount.other}`);
   log.info(`  Grupos (obra+temporada+episodio): ${groups.size}; grupos recortados: ${groupsTrimmed}`);
   log.info(
@@ -145,5 +163,5 @@ export async function runDedupe(db, config) {
 
   const deleted = await db.deleteByIds(idsToDelete, 'dedupe');
   log.info(`  Eliminados: ${deleted}`);
-  return { scanned, groups: groups.size, groupsTrimmed, deleted, reasons, langCount };
+  return { scanned, skippedUnsafe, groups: groups.size, groupsTrimmed, deleted, reasons, langCount };
 }

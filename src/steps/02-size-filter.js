@@ -48,7 +48,7 @@ export async function runSizeFilter(db, config) {
       }
     }
 
-    const deleted = await db.deleteByIds(ids, `size:${type}`);
+    const deleted = await db.deleteByIds(ids, `size:${type}`, applyFilters);
     stats.deleted += deleted;
     log.info(`  ${type.padEnd(6)} < ${formatBytes(minBytes)}: ${deleted} eliminados`);
   }

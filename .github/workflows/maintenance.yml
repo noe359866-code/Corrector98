@@ -1,68 +1,56 @@
-name: Mantenimiento de torrents
+name: Analisis de mantenimiento (sin escrituras)
 
 on:
-  # Todos los días a las 04:30 UTC.
   schedule:
     - cron: '30 4 * * *'
-  # Ejecución manual desde la pestaña "Actions" (por defecto en modo simulación).
   workflow_dispatch:
     inputs:
-      dry_run:
-        description: 'Simular sin modificar la base de datos'
-        type: boolean
-        default: true
       steps:
-        description: 'Pasos a ejecutar (adult,size,dead,normalize,enrich,dedupe)'
+        description: 'Pasos a analizar'
         type: string
         default: 'adult,size,dead,normalize,enrich,dedupe'
-      max_delete_ratio:
-        description: 'Freno de seguridad: fracción máxima de la tabla que se puede borrar'
-        type: string
-        default: '0.5'
 
-# Nunca dos ejecuciones a la vez sobre la misma tabla.
+# Compartido con apply: no analizar y aplicar simultáneamente desde Actions.
 concurrency:
   group: torrents-maintenance
   cancel-in-progress: false
-
 permissions:
   contents: read
 
 jobs:
-  maintenance:
+  scan:
     runs-on: ubuntu-latest
-    timeout-minutes: 180
-
+    timeout-minutes: 90
+    environment: maintenance-scan
     steps:
-      - name: Checkout
-        uses: actions/checkout@v7
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v7
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 22
           cache: npm
-
-      - name: Instalar dependencias
-        run: npm ci --omit=dev
-
-      - name: Tests unitarios (parsers y lógica de deduplicación)
-        run: npm test
-
-      - name: Ejecutar mantenimiento
+      - run: npm ci --ignore-scripts
+      - run: npm test
+      - name: Analizar con credencial de solo lectura
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          SUPABASE_READ_KEY: ${{ secrets.SUPABASE_READ_KEY }}
           TMDB_API_KEY: ${{ secrets.TMDB_API_KEY }}
-          # Programado → ejecución real. Manual → según el input (simulación por defecto).
-          DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run || 'false' }}
+          DRY_RUN: 'true'
           STEPS: ${{ inputs.steps || 'adult,size,dead,normalize,enrich,dedupe' }}
-          MAX_DELETE_RATIO: ${{ inputs.max_delete_ratio || vars.MAX_DELETE_RATIO || '0.5' }}
-          # Ajustes opcionales vía "Repository variables" (Settings → Secrets and variables → Actions → Variables)
-          DEDUPE_OTHER_LANGUAGES: ${{ vars.DEDUPE_OTHER_LANGUAGES || 'delete' }}
+          MAX_DELETE_RATIO: ${{ vars.MAX_DELETE_RATIO || '0.1' }}
+          MAX_DELETE_ROWS: ${{ vars.MAX_DELETE_ROWS || '1000' }}
+          DEDUPE_OTHER_LANGUAGES: ${{ vars.DEDUPE_OTHER_LANGUAGES || 'keep' }}
           ENRICH_MAX_TITLES: ${{ vars.ENRICH_MAX_TITLES || '0' }}
           ENRICH_MAX_MINUTES: ${{ vars.ENRICH_MAX_MINUTES || '45' }}
-          FILL_METADATA: ${{ vars.FILL_METADATA || 'true' }}
           ADULT_EXTRA_KEYWORDS: ${{ vars.ADULT_EXTRA_KEYWORDS }}
-        run: node src/index.js
-
+        run: npm start
+      - name: Conservar auditoria (incluso ante fallo)
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: scan-audit-${{ github.run_id }}-${{ github.run_attempt }}
+          path: audit/*.jsonl
+          retention-days: 30
+          if-no-files-found: warn
