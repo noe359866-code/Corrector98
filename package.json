@@ -1,0 +1,23 @@
+{
+  "name": "corrector98",
+  "version": "1.0.0",
+  "description": "Mantenimiento, limpieza, enriquecimiento de metadatos y deduplicación de la tabla `torrents` en Supabase.",
+  "type": "module",
+  "main": "src/index.js",
+  "bin": {
+    "corrector98": "src/index.js"
+  },
+  "scripts": {
+    "start": "node src/index.js",
+    "local": "node --env-file=.env src/index.js",
+    "local:dry": "DRY_RUN=true node --env-file=.env src/index.js",
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "@supabase/supabase-js": "^2.117.2"
+  }
+}
