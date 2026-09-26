@@ -1,0 +1,68 @@
+name: Mantenimiento de torrents
+
+on:
+  # Todos los días a las 04:30 UTC.
+  schedule:
+    - cron: '30 4 * * *'
+  # Ejecución manual desde la pestaña "Actions" (por defecto en modo simulación).
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Simular sin modificar la base de datos'
+        type: boolean
+        default: true
+      steps:
+        description: 'Pasos a ejecutar (adult,size,dead,normalize,enrich,dedupe)'
+        type: string
+        default: 'adult,size,dead,normalize,enrich,dedupe'
+      max_delete_ratio:
+        description: 'Freno de seguridad: fracción máxima de la tabla que se puede borrar'
+        type: string
+        default: '0.5'
+
+# Nunca dos ejecuciones a la vez sobre la misma tabla.
+concurrency:
+  group: torrents-maintenance
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  maintenance:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Instalar dependencias
+        run: npm ci --omit=dev
+
+      - name: Tests unitarios (parsers y lógica de deduplicación)
+        run: npm test
+
+      - name: Ejecutar mantenimiento
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          TMDB_API_KEY: ${{ secrets.TMDB_API_KEY }}
+          # Programado → ejecución real. Manual → según el input (simulación por defecto).
+          DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run || 'false' }}
+          STEPS: ${{ inputs.steps || 'adult,size,dead,normalize,enrich,dedupe' }}
+          MAX_DELETE_RATIO: ${{ inputs.max_delete_ratio || vars.MAX_DELETE_RATIO || '0.5' }}
+          # Ajustes opcionales vía "Repository variables" (Settings → Secrets and variables → Actions → Variables)
+          DEDUPE_OTHER_LANGUAGES: ${{ vars.DEDUPE_OTHER_LANGUAGES || 'delete' }}
+          ENRICH_MAX_TITLES: ${{ vars.ENRICH_MAX_TITLES || '400' }}
+          ENRICH_MAX_MINUTES: ${{ vars.ENRICH_MAX_MINUTES || '45' }}
+          FILL_METADATA: ${{ vars.FILL_METADATA || 'true' }}
+          ADULT_EXTRA_KEYWORDS: ${{ vars.ADULT_EXTRA_KEYWORDS }}
+        run: node src/index.js
+
